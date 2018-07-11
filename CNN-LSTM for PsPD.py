@@ -2,9 +2,13 @@ from keras.layers import Dense, LSTM, Merge, Convolution2D, MaxPooling2D, Flatte
 from keras.models import Sequential, model_from_json
 from keras.layers.wrappers import TimeDistributed
 from keras import backend as K
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import roc_curve, auc, confusion_matrix, classification_report, precision_recall_curve, average_precision_score
+from keras import optimizers
+
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.metrics import roc_curve, auc, confusion_matrix, classification_report, precision_recall_curve, average_precision_score, accuracy_score
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.utils import shuffle
+from sklearn.ensemble import RandomForestClassifier
 
 from scipy import interp
 import pandas as pd
@@ -22,12 +26,14 @@ import itertools
 import random
 
 
-### For tuning for stochastic model
+### For tuning for stochastic model and s
 # seed=random.randint(0, 2**31 - 1)
 ### For reproductivity in 10-fold
 # seed= 205486557
-### For Benchmark
+### For Benchmark and confirming for negative control with scrambling
 seed=7777
+### Scramble inputs for negative?
+scrambleFornegative = False
 
 
 print(seed)
@@ -50,6 +56,8 @@ nb_clinic = 7
 
 ### The number of class: PsPD versus PD
 nb_class = 1
+
+
 
 
 def clinic_model():
@@ -117,6 +125,17 @@ def makemodel (ncell):
 
     return decoder
 
+def makemodel_lr (lr):
+    decoder = Sequential()
+    decoder.add(Merge([mri_model(24), clinic_model()], mode='concat'))
+    decoder.add(Dense(1, activation='sigmoid'))
+    decoder.compile(loss='binary_crossentropy',
+                     optimizer=optimizers.SGD(lr=lr),
+                     metrics=['accuracy'])
+
+    return decoder
+
+
 def makemodel_wo_clinic (ncell):
     decoder=mri_model(ncell)
     decoder.add(Dense(1, activation='sigmoid'))
@@ -127,6 +146,9 @@ def makemodel_wo_clinic (ncell):
 
 
     return decoder
+
+
+
 
 
 def determine_epoch (x_mri1, x_clinic, y):
@@ -188,7 +210,7 @@ def determine_ncell (x_mri1, x_clinic, y):
 # Optimal ncell size usign 5-fold validation in testing set, comparing AUC
     params = [24, 22, 20, 18] # with batch=8 --> determinined to 24
 
-    k=5
+    k = 5
     scores = DataFrame()
     i = 0
 
@@ -218,9 +240,45 @@ def determine_ncell (x_mri1, x_clinic, y):
     (scores.describe()).to_csv('result_sum for ncell.csv')
 
 
+
+def determine_lr (x_mri1, x_clinic, y):
+    params = [0.0001, 0.001, 0.01, 0.1]  # with batch=8 --> determinined to 24
+
+    k = 5
+    scores = DataFrame()
+    i = 0
+    
+    cv = StratifiedKFold(n_splits=k, shuffle=False, random_state=seed)
+    for value in params:
+        aucs = list()
+
+        for train, test in cv.split(x_clinic, y):
+            decoder = makemodel_lr(value)
+            decoder.fit([x_mri1[train], x_clinic[train]], y[train], batch_size=8, epochs=25, verbose=2)
+            probas_ = decoder.predict([x_mri1[test], x_clinic[test]], batch_size=8)
+            fpr, tpr, thresholds = roc_curve(y[test], probas_)
+            roc_auc = auc(fpr, tpr)
+            aucs.append(roc_auc)
+
+            print('%d iteration, Learning rate=%f, ROC=%f' % (i+1, value, roc_auc))
+            i = i+1
+            K.clear_session()
+
+        scores[str(value)] = aucs
+
+    print(scores.describe())
+    scores.boxplot()
+    plt.show()
+
+    scores.to_csv('result for lr.csv')
+    (scores.describe()).to_csv('result_sum for lr.csv')
+    
+    
+
+
 def run_train():
 
-    TRAIN_FOLDER = '<To be modified>'
+    TRAIN_FOLDER = 'C:/Users/JBS/Desktop/PsPDtrain_1mm(SNUH)'
     x_clinic, y = load_csv(TRAIN_FOLDER)
     # x_mri1 = load_dicom(TRAIN_FOLDER, test=False)
     x_mri1=load_npz('Training/input_data_train.npz')
@@ -230,10 +288,10 @@ def run_train():
     # determine_epoch(x_mri1, x_clinic, y)
     # determine_batch(x_mri1, x_clinic, y)
     # determine_ncell(x_mri1, x_clinic, y)
-
+    # determine_lr (x_mri1, x_clinic, y)
 
     ##########################################################################
-    ## 5-fold internal validation with 1 iteration in the trainingining set  #
+    ## 10-fold internal validation with 1 iteration in the trainingining set  #
     ##########################################################################
 
     scores_roc = DataFrame()
@@ -243,8 +301,15 @@ def run_train():
     meanPre = list()
 
 
-    k = 10
+    if scrambleFornegative==True:
+        x_clinic=shuffle(x_clinic,random_state=seed)
+        x_mri1=shuffle(x_mri1, random_state=seed)
+
+
+    k = 3
     iter = 1
+
+
     cv = StratifiedKFold(n_splits=k, shuffle=False, random_state=seed)
 
     for i in range(iter):
@@ -294,30 +359,35 @@ def finalize_model():
     TRAIN_FOLDER = 'C:/Users/JBS/Desktop/PsPDtrain_1mm(SNUH)'
     x_clinic, y = load_csv(TRAIN_FOLDER)
     # x_mri1 = load_dicom(TRAIN_FOLDER, test=False)
-    x_mri1=load_npz('input_data_train.npz')
+    x_mri1=load_npz('Training/input_data_train.npz')
+
+
+    ## To check out negative control
+    if scrambleFornegative==True:
+        x_clinic=shuffle(x_clinic,random_state=seed)
+        x_mri1=shuffle(x_mri1, random_state=seed)
 
 
     NCELL=24
     EPOCH=25
     BATCH=8
 
-
-
     decoder=makemodel(NCELL)
 
     architecture = decoder.to_json()
-    with open('Structure.json', 'wt') as json_file:
+    with open('Finalized Models/Structure.json', 'wt') as json_file:
         json_file.write(architecture)
 
     decoder.fit([x_mri1, x_clinic], y, batch_size=BATCH, epochs=EPOCH, shuffle=False)
-    decoder.save_weights('final.hdf5')
+    decoder.save_weights('Finalized Models/final.hdf5')
 
 def finalize_model_wo_clinic():
 
-    TRAIN_FOLDER = '<to be modified>'
+    TRAIN_FOLDER = 'C:/Users/JBS/Desktop/PsPDtrain_1mm(SNUH)'
     x_clinic, y = load_csv(TRAIN_FOLDER)
     # x_mri1 = load_dicom(TRAIN_FOLDER, test=False)
     x_mri1=load_npz('Training/input_data_train.npz')
+
 
     NCELL=24
     EPOCH=25
@@ -336,7 +406,7 @@ def finalize_model_wo_clinic():
 
 def run_test():
 
-    TEST_FOLDER = '<to be modified>'
+    TEST_FOLDER = 'C:/Users/JBS/Desktop/PsPDtest_1mm(SNUBH)'
     x_clinic, y = load_csv(TEST_FOLDER)
     # x_mri1 = load_dicom(TEST_FOLDER)
     x_mri1 = load_npz('Testing/input_data_test.npz')
@@ -430,8 +500,8 @@ def cal_auc(cv, x_clinic, x_mri1, y):
     plt.title('Receiver operating characteristic example')
     plt.legend(loc="lower right")
 
-    plt.show()
     plt.savefig('Mean ROC (AUC = %0.2f -- %0.2f).pdf' % (mean_auc, std_auc), format='pdf')
+    plt.show()
     plt.clf()
 
     ################################################
@@ -555,8 +625,8 @@ def show_auc(classifier, x_mri1, x_clinic, y):
 
 def show_auc_wo_clinic (classifier, x_mri1, y):
 
-    probas_ = classifier.predict([x_mri1], batch_size=8)
 
+    probas_ = classifier.predict([x_mri1], batch_size=8)
     # Compute ROC curve
     fpr, tpr, threshold = roc_curve(y, probas_)
     tpr[0]=0
@@ -748,13 +818,204 @@ def show_slice(arr, value_range=None):
 
     plt.show()
 
+def random_forest():
+
+    TRAIN_FOLDER = 'C:/Users/JBS/Desktop/PsPDtrain_1mm(SNUH)'
+    TEST_FOLDER = 'C:/Users/JBS/Desktop/PsPDtest_1mm(SNUBH)'
+    testX_clinic, testY = load_csv(TEST_FOLDER)
+    trainX_clinic, trainY = load_csv(TRAIN_FOLDER)
+
+    x1=trainX_clinic.shape[0]
+    x2=trainX_clinic.shape[1]
+    trainX_clinic= trainX_clinic.reshape(x1,x2)
+
+    x1=testX_clinic.shape[0]
+    x2=testX_clinic.shape[1]
+    testX_clinic= testX_clinic.reshape(x1,x2)
+
+
+
+#### Internal Val in the training set
+    cv = StratifiedKFold(n_splits=10, shuffle=False, random_state=seed)
+    rf = RandomForestClassifier(n_estimators=100, oob_score=True, random_state=seed)
+    results = cross_val_score(rf, trainX_clinic, trainY, cv=cv)
+    print(results.mean())
+
+    tprs = []
+    aucs_roc = []
+    aucs_precall = []
+    ytests =[]
+    probas = []
+    precision = dict()
+    recall = dict()
+    average_precision = dict()
+
+
+    mean_fpr = np.linspace(0, 1, 100)
+    i = 0
+
+    for train, test in cv.split(trainX_clinic, trainY):
+        rf = RandomForestClassifier(n_estimators=100, oob_score=True, random_state=seed)
+        rf.fit(trainX_clinic[train], trainY[train])
+        probas_ = rf.predict(trainX_clinic[test])
+
+        # Compute ROC curve
+        fpr, tpr, thresholds = roc_curve(trainY[test], probas_)
+        tprs.append(interp(mean_fpr, fpr, tpr))
+        tprs[-1][0] = 0.0
+        roc_auc = auc(fpr, tpr)
+        aucs_roc.append(roc_auc)
+        plt.plot(fpr, tpr, lw=1, alpha=0.3, label='ROC of fold %d (AUC = %0.2f)' % (i, roc_auc))
+
+        # Compute precision-recall curve
+        precision[i], recall[i], _ = precision_recall_curve(trainY[test], probas_)
+        average_precision[i] = average_precision_score(trainY[test], probas_)
+        ytests.append(trainY[test])
+        probas.append(probas_)
+
+        i += 1
+
+
+
+    ################################################
+    ###########   Plotting ROC curve  ##############
+    ################################################
+    plt.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r',label='Luck', alpha=.8)
+
+    mean_tpr = np.mean(tprs, axis=0)
+    mean_tpr[-1] = 1.0
+    mean_auc = auc(mean_fpr, mean_tpr)
+    std_auc = np.std(aucs_roc)
+    plt.plot(mean_fpr, mean_tpr, color='b',
+             label=r'Mean ROC (AUC = %0.2f $\pm$ %0.2f)' % (mean_auc, std_auc), lw=2, alpha=.8)
+
+    std_tpr = np.std(tprs, axis=0)
+    tprs_upper = np.minimum(mean_tpr + std_tpr, 1)
+    tprs_lower = np.maximum(mean_tpr - std_tpr, 0)
+    plt.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=.2, label=r'$\pm$ 1 std. dev.')
+
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver operating characteristic example')
+    plt.legend(loc="lower right")
+
+    plt.savefig('RF_internal_Mean ROC (AUC = %0.2f -- %0.2f).pdf' % (mean_auc, std_auc), format='pdf')
+    plt.show()
+    plt.clf()
+
+
+
+
+
+
+#### External Val in the testing set
+    rf = RandomForestClassifier(n_estimators=100, oob_score=True, random_state=seed)
+    rf.fit(trainX_clinic, trainY)
+
+    probas_ = rf.predict(testX_clinic)
+    accuracy = accuracy_score(testY, probas_)
+
+    print(f'Out-of-bag score estimate: {rf.oob_score_:.3}')
+    print(f'Mean accuracy score: {accuracy:.3}')
+
+
+   # Compute ROC curve
+    fpr, tpr, threshold = roc_curve(testY, probas_)
+    tpr[0]=0
+    roc_auc = auc(fpr, tpr)
+    plt.plot(fpr, tpr, lw=1, label='ROC Curve (AUC = %0.2f)' % (roc_auc), alpha=1, color='g')
+
+    # Compute precision-recall curve
+    precision, recall, _ = precision_recall_curve(testY, probas_)
+    average_precision = average_precision_score(testY, probas_)
+
+    ################################################
+    ###########   Plotting ROC curve  ##############
+    ################################################
+    plt.plot([0, 1], [0, 1], linestyle='--', lw=2, alpha=0.2, color='r',label='Luck')
+    plt.ylim([0.0, 1.05])
+    plt.xlim([0.0, 1.0])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver Operating Characteristic Curve')
+    plt.legend(loc="lower right")
+
+    plt.savefig('RF_ROC (AUC = %0.2f).pdf' % (roc_auc), format='pdf')
+    plt.show()
+    plt.clf()
+
+    ################################################
+    ##### Plotting Precision-Recall curve ##########
+    ################################################
+
+    # Compute micro-average ROC curve and ROC area
+
+    plt.plot(recall, precision,label='Precision-Recall Curve (AUPRC = {0:0.2f})'''.format(average_precision), color='green')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.title('Precision-Recall Curve')
+    plt.legend(loc="lower right")
+    plt.savefig('RF_Precision-Recall (AUPRC = %0.2f).pdf' % (average_precision), format='pdf')
+    plt.show()
+    plt.clf()
+
+
+    ################################################
+    ##### Confusion Matrix #########################
+    ################################################
+
+
+    # The optimal cut off would be where tpr is high and fpr is low
+    # tpr - (1-fpr) is zero or near to zero is the optimal cut off point
+
+    i = np.arange(len(tpr))  # index for df
+    roc = pd.DataFrame(
+        {'fpr': pd.Series(fpr, index=i), 'tpr': pd.Series(tpr, index=i), '1-fpr': pd.Series(1 - fpr, index=i),
+         'tf': pd.Series(tpr - (1 - fpr), index=i), 'threshold': pd.Series(threshold, index=i)})
+    roc.ix[(roc.tf - 0).abs().argsort()[:1]]
+
+    #### Confusion Matrix
+    roc_t = roc.ix[(roc.tf - 0).abs().argsort()[:1]]
+    optimal_cutoff = list(roc_t['threshold'])
+    print (optimal_cutoff)
+    report = classification_report(testY, probas_ >= optimal_cutoff)
+    print (report)
+
+    cm = confusion_matrix(testY, probas_ >= optimal_cutoff)
+    print(cm)
+    cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    print(cm)
+
+    plt.matshow(cm, cmap=plt.cm.Greens)
+    plt.colorbar()
+    fmt = '.2f'
+    thresh = 0.5
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        plt.text(j, i, format(cm[i, j], fmt),
+                 horizontalalignment="center",
+                 color="white" if cm[i, j] > thresh else "black")
+
+    plt.xlabel("Predicted label")
+    plt.ylabel("True label")
+    plt.savefig('Confusion matrix.pdf', format='pdf')
+    plt.show()
 
 if __name__ == '__main__':
+
+###### Model 1 ######
      # run_train()
-     # finalize_model()
+     finalize_model()
      run_test()
 
+###### Model 2 ######
      # finalize_model_wo_clinic()
-     run_test_wo_clinic()
+     # run_test_wo_clinic()
+
+###### Model 3 ######
+     # random_forest()
 
 
