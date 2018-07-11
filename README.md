@@ -2,8 +2,6 @@ CNN-LSTM model for classifying pseudoprogression versus progression in glioblast
 
 
 Detail methods are goint to be published as a paper.
-You can test a model with inputs in 'Testing' Folder and source code
-
 
 Environment: 
   (Hardware)
